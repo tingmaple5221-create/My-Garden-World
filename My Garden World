@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>芳庭揽翠</title>
+
+<script>
+  // ===== 🔧 在此填入你的 Supabase 設定 =====
+  const SUPABASE_URL = "https://zkvvgzrzwvzaafwiysku.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InprdnZnenJ6d3Z6YWFmd2l5c2t1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAzMDUwMzMsImV4cCI6MjA5NTg4MTAzM30.hisNiAc6Bx47SELxPRSb2Yta5bSgFmfI-w84QOKaKzY";
+  // ==========================================
+
+  const DELETE_PASSWORD = "8888"; // 🔧 修改此刪除密碼
+
+  const GRADES = ["仙品（红）", "华品（金）", "珍品（紫）氪", "珍品（紫）"];
+  const GRADE_COLORS = {
+    "仙品（红）": { bg:"#fff0f0", border:"#e74c3c", header:"#c0392b", badge:"#e74c3c" },
+    "华品（金）": { bg:"#fffbf0", border:"#f39c12", header:"#d68910", badge:"#f39c12" },
+    "珍品（紫）氪": { bg:"#f8f0ff", border:"#8e44ad", header:"#7d3c98", badge:"#8e44ad" },
+    "珍品（紫）": { bg:"#f5f0ff", border:"#9b59b6", header:"#884ea0", badge:"#9b59b6" }
+  };
+
+  // ===== 全域狀態 =====
+  let members = {};   // { name: true }
+  let flowers = {};   // { name: { name, grade } }
+  let ownership = {}; // { memberName: { flowerName: true } }
+  let realtimeChannel = null;
+
+  // ===== Supabase REST API 封裝 =====
+  async function sbFetch(path, options = {}) {
+    const url = SUPABASE_URL + "/rest/v1/" + path;
+    const res = await fetch(url, {
+      ...options,
+      headers: {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": "Bearer " + SUPABASE_ANON_KEY,
+        "Content-Type": "application/json",
+        "Prefer": options.prefer || "return=representation",
+        ...(options.headers || {})
+      }
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(err);
+    }
+    const text = await res.text();
+    return text ? JSON.parse(text) : [];
+  }
+
+  async function sbGet(table, query = "") {
+    return sbFetch(table + "?" + query, { method: "GET" });
+  }
+
+  async function sbInsert(table, data) {
+    return sbFetch(table, { method: "POST", body: JSON.stringify(data) });
+  }
+
+  async function sbUpdate(table, query, data) {
+    return sbFetch(table + "?" + query, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+      prefer: "return=representation"
+    });
+  }
+
+  async function sbDelete(table, query) {
+    return sbFetch(table + "?" + query, { method: "DELETE", prefer: "return=minimal" });
+  }
+
+  // ===== 載入全部資料 =====
+  async function loadAll() {
+    const [memberRows, flowerRows, ownerRows] = await Promise.all([
+      sbGet("members", "select=name&order=name.asc"),
+      sbGet("flowers", "select=name,grade&order=name.asc"),
+      sbGet("ownership", "select=member_name,flower_name")
+    ]);
+
+    members = {};
+    memberRows.forEach(r => { members[r.name] = true; });
+
+    flowers = {};
+    flowerRows.forEach(r => { flowers[r.name] = { name: r.name, grade: r.grade }; });
+
+    ownership = {};
+    ownerRows.forEach(r => {
+      if (!ownership[r.member_name]) ownership[r.member_name] = {};
+      ownership[r.member_name][r.flower_name] = true;
+    });
+
+    renderAll();
+  }
+
+  // ===== Supabase Realtime（即時同步）=====
+  function startRealtime() {
+    // 使用 Supabase Realtime WebSocket
+    const wsUrl = SUPABASE_URL.replace("https://", "wss://") + "/realtime/v1/websocket?apikey=" + SUPABASE_ANON_KEY + "&vsn=1.0.0";
+    let ws;
+    let pingInterval;
+    let reconnectTimeout;
+    let joined = false;
+
+    function connect() {
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        // 訂閱所有三張表的變更
+        const tables = ["members", "flowers", "ownership"];
+        tables.forEach((table, i) => {
+          ws.send(JSON.stringify({
+            topic: "realtime:public:" + table,
+            event: "phx_join",
+            payload: { config: { broadcast: { self: true }, presence: { key: "" } } },
+            ref: String(i + 1)
+          }));
+        });
+        pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ topic: "phoenix", event: "heartbeat", payload: {}, ref: "hb" }));
+          }
+        }, 20000);
+      };
+
+      ws.onmessage = (e) => {
+        const msg = JSON.parse(e.data);
+        if (msg.event === "INSERT" || msg.event === "UPDATE" || msg.event === "DELETE") {
+          // 收到任何變更就重新載入
+          loadAll();
+        }
+      };
+
+      ws.onclose = () => {
+        clearInterval(pingInterval);
+        // 5 秒後重連
+        reconnectTimeout = setTimeout(connect, 5000);
+      };
+
+      ws.onerror = () => { ws.close(); };
+    }
+
+    connect();
+  }
+
+  // ===== 資料操作函數 =====
+  async function dbAddMember(name) {
+    await sbInsert("members", { name });
+  }
+
+  async function dbDeleteMember(name) {
+    // 先刪擁有記錄，再刪成員
+    await sbDelete("ownership", "member_name=eq." + encodeURIComponent(name));
+    await sbDelete("members", "name=eq." + encodeURIComponent(name));
+  }
+
+  async function dbAddFlower(name, grade) {
+    await sbInsert("flowers", { name, grade });
+  }
+
+  async function dbUpdateFlower(oldName, newName, newGrade) {
+    // 先更新 ownership 中的花朵名稱
+    if (oldName !== newName) {
+      await sbUpdate("ownership", "flower_name=eq." + encodeURIComponent(oldName), { flower_name: newName });
+    }
+    await sbUpdate("flowers", "name=eq." + encodeURIComponent(oldName), { name: newName, grade: newGrade });
+  }
+
+  async function dbDeleteFlower(name) {
+    await sbDelete("ownership", "flower_name=eq." + encodeURIComponent(name));
+    await sbDelete("flowers", "name=eq." + encodeURIComponent(name));
+  }
+
+  async function dbAddOwnership(memberName, flowerName) {
+    await sbInsert("ownership", { member_name: memberName, flower_name: flowerName });
+  }
+
+  // ===== 渲染邏輯 =====
+  function getMemberList() { return Object.keys(members).sort(); }
+  function getFlowersByGrade(grade) {
+    return Object.values(flowers).filter(f => f.grade === grade);
+  }
+  function getMembersWithGrade(grade) {
+    const flowerNames = getFlowersByGrade(grade).map(f => f.name);
+    return getMemberList().filter(m => flowerNames.some(fn => ownership[m]?.[fn]));
+  }
+  function getSortedFlowers(grade) {
+    return getFlowersByGrade(grade).sort((a, b) => {
+      const cntA = getMemberList().filter(m => ownership[m]?.[a.name]).length;
+      const cntB = getMemberList().filter(m => ownership[m]?.[b.name]).length;
+      return cntB - cntA;
+    });
+  }
+
+  function renderAll() {
+    renderTables();
+    renderSummaryTable();
+    renderMemberList();
+    updateDropdowns();
+  }
+
+  function renderTables() {
+    const container = document.getElementById("grade-tables");
+    // 保留已展開狀態
+    const openGrades = {};
+    container.querySelectorAll(".grade-section").forEach(sec => {
+      const wrap = sec.querySelector(".grade-table-wrap");
+      if (wrap && wrap.style.display !== "none") openGrades[sec.dataset.grade] = true;
+    });
+
+    container.innerHTML = "";
+    GRADES.forEach(grade => {
+      const colors = GRADE_COLORS[grade];
+      const sortedFlowers = getSortedFlowers(grade);
+      const gradeMembers = getMembersWithGrade(grade);
+      const isOpen = !!openGrades[grade];
+
+      const section = document.createElement("div");
+      section.className = "grade-section";
+      section.dataset.grade = grade;
+
+      const btn = document.createElement("button");
+      btn.className = "grade-toggle-btn";
+      btn.style.cssText = `background:${colors.header};border-color:${colors.border};`;
+      btn.innerHTML = `<span class="grade-btn-label">${grade}．${sortedFlowers.length}</span><span class="toggle-arrow">${isOpen ? "▲" : "▼"}</span>`;
+      btn.onclick = () => {
+        const wrap = section.querySelector(".grade-table-wrap");
+        const arrow = btn.querySelector(".toggle-arrow");
+        const open = wrap.style.display !== "none";
+        wrap.style.display = open ? "none" : "block";
+        arrow.textContent = open ? "▼" : "▲";
+      };
+
+      const tableWrap = document.createElement("div");
+      tableWrap.className = "grade-table-wrap";
+      tableWrap.style.display = isOpen ? "block" : "none";
+
+      if (sortedFlowers.length === 0 || gradeMembers.length === 0) {
+        tableWrap.innerHTML = `<p class="empty-tip">暂无数据</p>`;
+      } else {
+        const scroll = document.createElement("div");
+        scroll.className = "table-scroll";
+        const table = document.createElement("table");
+        table.className = "data-table";
+        table.style.borderColor = colors.border;
+
+        const thead = document.createElement("thead");
+        let hHtml = `<tr><th style="background:${colors.header}">花朵名称</th><th style="background:${colors.header}">总数</th>`;
+        gradeMembers.forEach(m => { hHtml += `<th style="background:${colors.header}">${m}</th>`; });
+        hHtml += "</tr>";
+        thead.innerHTML = hHtml;
+        table.appendChild(thead);
+
+        const tbody = document.createElement("tbody");
+        sortedFlowers.forEach(flower => {
+          const cnt = gradeMembers.filter(m => ownership[m]?.[flower.name]).length;
+          const tr = document.createElement("tr");
+          tr.id = "flower-row-" + encodeURIComponent(flower.name);
+          let rHtml = `<td class="flower-name-cell">${flower.name}</td><td class="count-cell">${cnt}</td>`;
+          gradeMembers.forEach(m => {
+            const has = !!ownership[m]?.[flower.name];
+            rHtml += `<td class="check-cell${has ? " has-flower" : ""}" style="${has ? "background:"+colors.bg : ""}">${has ? "✓" : ""}</td>`;
+          });
+          tr.innerHTML = rHtml;
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        scroll.appendChild(table);
+        tableWrap.appendChild(scroll);
+      }
+
+      section.appendChild(btn);
+      section.appendChild(tableWrap);
+      container.appendChild(section);
+    });
+  }
+
+  window.toggleSummary = function() {
+    const wrap = document.getElementById("summary-table-wrap");
+    const arrow = document.getElementById("summary-arrow");
+    const open = wrap.style.display !== "none";
+    wrap.style.display = open ? "none" : "block";
+    arrow.textContent = open ? "▼" : "▲";
+  };
+
+  function renderSummaryTable() {
+    const container = document.getElementById("summary-table-container");
+    // 更新按鈕上的總花朵數
+    const totalFlowers = Object.keys(flowers).length;
+    const labelEl = document.getElementById("summary-btn-label");
+    if (labelEl) labelEl.textContent = "总数量．" + totalFlowers;
+    const memberList = getMemberList();
+    if (memberList.length === 0) {
+      container.innerHTML = "<p class='empty-tip'>暂无成员数据</p>";
+      return;
+    }
+    let html = `<div class="table-scroll"><table class="data-table summary-table"><thead><tr><th>成员</th>`;
+    GRADES.forEach(g => { html += `<th>${g}</th>`; });
+    html += `<th>总计</th></tr></thead><tbody>`;
+
+    memberList.forEach(m => {
+      html += `<tr><td class="member-name-cell">${m}</td>`;
+      let total = 0;
+      GRADES.forEach(g => {
+        const cnt = getFlowersByGrade(g).filter(f => ownership[m]?.[f.name]).length;
+        total += cnt;
+        html += `<td class="count-cell">${cnt > 0 ? cnt : "-"}</td>`;
+      });
+      html += `<td class="count-cell total-count">${total}</td></tr>`;
+    });
+
+    html += `<tr class="total-row"><td>合计花种</td>`;
+    GRADES.forEach(g => {
+      html += `<td class="count-cell">${getFlowersByGrade(g).length} 种</td>`;
+    });
+    html += `<td class="count-cell total-count">${Object.keys(flowers).length} 种</td></tr>`;
+    html += `</tbody></table></div>`;
+    container.innerHTML = html;
+  }
+
+  function renderMemberList() {
+    const el = document.getElementById("member-list-display");
+    const list = getMemberList();
+    el.innerHTML = list.length === 0
+      ? "<span class='empty-tip'>暂无成员</span>"
+      : list.map(m => `<span class="member-tag">${m}</span>`).join("");
+  }
+
+  function updateDropdowns() {
+    const flowerList = Object.values(flowers).sort((a,b) => a.name.localeCompare(b.name, "zh"));
+    const memberList = getMemberList();
+
+    // 搜尋建議
+    document.getElementById("flower-search-list").innerHTML =
+      flowerList.map(f => `<option value="${f.name}">`).join("");
+
+    // 新增擁有 - 成員
+    const omSel = document.getElementById("add-owner-member");
+    const omVal = omSel.value;
+    omSel.innerHTML = `<option value="">-- 选择成员 --</option>` +
+      memberList.map(m => `<option value="${m}"${m===omVal?" selected":""}>${m}</option>`).join("");
+
+    // 新增擁有 - 花朵
+    const ofSel = document.getElementById("add-owner-flower");
+    const ofVal = ofSel.value;
+    ofSel.innerHTML = `<option value="">-- 选择花朵 --</option>` +
+      flowerList.map(f => `<option value="${f.name}"${f.name===ofVal?" selected":""}>${f.name}（${f.grade}）</option>`).join("");
+
+    // 刪除成員
+    const dmSel = document.getElementById("delete-member-select");
+    const dmVal = dmSel.value;
+    dmSel.innerHTML = `<option value="">-- 选择成员 --</option>` +
+      memberList.map(m => `<option value="${m}"${m===dmVal?" selected":""}>${m}</option>`).join("");
+
+    // 修改花朵
+    updateEditFlowerList();
+  }
+
+  function updateEditFlowerList() {
+    const grade = document.getElementById("edit-flower-grade-filter")?.value || "";
+    const sel = document.getElementById("edit-flower-select");
+    if (!sel) return;
+    const curVal = sel.value;
+    const list = grade
+      ? Object.values(flowers).filter(f => f.grade === grade)
+      : Object.values(flowers).sort((a,b) => a.name.localeCompare(b.name,"zh"));
+    sel.innerHTML = `<option value="">-- 选择花朵 --</option>` +
+      list.map(f => `<option value="${f.name}"${f.name===curVal?" selected":""}>${f.name}</option>`).join("");
+  }
+
+  // ===== 搜尋 =====
+  window.searchFlower = function() {
+    const query = document.getElementById("search-input").value.trim();
+    if (!query) return;
+    const flower = flowers[query];
+    if (!flower) { showMsg("search-msg", `未找到花朵「${query}」`, "error"); return; }
+
+    // 展開對應等級
+    const grade = flower.grade;
+    document.querySelectorAll(".grade-section").forEach(sec => {
+      if (sec.dataset.grade === grade) {
+        const wrap = sec.querySelector(".grade-table-wrap");
+        const arrow = sec.querySelector(".toggle-arrow");
+        wrap.style.display = "block";
+        if (arrow) arrow.textContent = "▲";
+      }
+    });
+
+    setTimeout(() => {
+      const row = document.getElementById("flower-row-" + encodeURIComponent(query));
+      if (row) {
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        row.classList.add("highlight-row");
+        setTimeout(() => row.classList.remove("highlight-row"), 15000);
+        showMsg("search-msg", `已找到「${query}」`, "success");
+      }
+    }, 120);
+  };
+
+  // ===== 新增成員 =====
+  window.addMember = async function() {
+    const name = document.getElementById("new-member-name").value.trim();
+    if (!name) { showMsg("add-member-msg", "请输入成员名字", "error"); return; }
+    if (members[name]) { showMsg("add-member-msg", "已有该成员", "error"); return; }
+    setLoading("btn-add-member", true);
+    try {
+      await dbAddMember(name);
+      await loadAll();
+      document.getElementById("new-member-name").value = "";
+      showMsg("add-member-msg", `成功新增 ${name}`, "success");
+    } catch(e) { showMsg("add-member-msg", "新增失败：" + e.message, "error"); }
+    setLoading("btn-add-member", false);
+  };
+
+  // ===== 新增花朵 =====
+  window.addFlower = async function() {
+    const name = document.getElementById("new-flower-name").value.trim();
+    const grade = document.getElementById("new-flower-grade").value;
+    if (!name) { showMsg("add-flower-msg", "请输入花朵名称", "error"); return; }
+    if (!grade) { showMsg("add-flower-msg", "请选择等级", "error"); return; }
+    if (flowers[name]) { showMsg("add-flower-msg", `花朵「${name}」已存在`, "error"); return; }
+    setLoading("btn-add-flower", true);
+    try {
+      await dbAddFlower(name, grade);
+      await loadAll();
+      document.getElementById("new-flower-name").value = "";
+      showMsg("add-flower-msg", `成功新增花朵「${name}」（${grade}）`, "success");
+    } catch(e) { showMsg("add-flower-msg", "新增失败：" + e.message, "error"); }
+    setLoading("btn-add-flower", false);
+  };
+
+  // ===== 新增擁有花朵 =====
+  window.addOwnership = async function() {
+    const member = document.getElementById("add-owner-member").value;
+    const flower = document.getElementById("add-owner-flower").value;
+    if (!member) { showMsg("add-owner-msg", "请选择成员", "error"); return; }
+    if (!flower) { showMsg("add-owner-msg", "请选择花朵", "error"); return; }
+    if (ownership[member]?.[flower]) {
+      showMsg("add-owner-msg", `${member} 已拥有 ${flower}`, "error"); return;
+    }
+    setLoading("btn-add-owner", true);
+    try {
+      await dbAddOwnership(member, flower);
+      await loadAll();
+      showMsg("add-owner-msg", `${member} 已新增 ${flower}`, "success");
+    } catch(e) { showMsg("add-owner-msg", "新增失败：" + e.message, "error"); }
+    setLoading("btn-add-owner", false);
+  };
+
+  // ===== 刪除成員 =====
+  window.deleteMember = async function() {
+    const name = document.getElementById("delete-member-select").value;
+    const pwd = document.getElementById("delete-member-pwd").value;
+    if (!name) { showMsg("delete-member-msg", "请选择要删除的成员", "error"); return; }
+    if (pwd !== DELETE_PASSWORD) { showMsg("delete-member-msg", "密码错误", "error"); return; }
+    if (!confirm(`确定要删除成员「${name}」及其所有花朵数据吗？`)) return;
+    setLoading("btn-delete-member", true);
+    try {
+      await dbDeleteMember(name);
+      await loadAll();
+      document.getElementById("delete-member-pwd").value = "";
+      showMsg("delete-member-msg", `已删除成员「${name}」`, "success");
+    } catch(e) { showMsg("delete-member-msg", "删除失败：" + e.message, "error"); }
+    setLoading("btn-delete-member", false);
+  };
+
+  // ===== 修改花朵 =====
+  window.onEditGradeChange = function() { updateEditFlowerList(); };
+
+  window.onEditFlowerSelect = function() {
+    const name = document.getElementById("edit-flower-select").value;
+    if (!name || !flowers[name]) return;
+    document.getElementById("edit-flower-new-name").value = flowers[name].name;
+    document.getElementById("edit-flower-new-grade").value = flowers[name].grade;
+  };
+
+  window.saveFlowerEdit = async function() {
+    const oldName = document.getElementById("edit-flower-select").value;
+    const newName = document.getElementById("edit-flower-new-name").value.trim();
+    const newGrade = document.getElementById("edit-flower-new-grade").value;
+    if (!oldName) { showMsg("edit-flower-msg", "请先选择花朵", "error"); return; }
+    if (!newName) { showMsg("edit-flower-msg", "请输入新名称", "error"); return; }
+    if (!newGrade) { showMsg("edit-flower-msg", "请选择新等级", "error"); return; }
+    if (newName !== oldName && flowers[newName]) { showMsg("edit-flower-msg", `花朵「${newName}」已存在`, "error"); return; }
+    setLoading("btn-save-flower", true);
+    try {
+      await dbUpdateFlower(oldName, newName, newGrade);
+      await loadAll();
+      showMsg("edit-flower-msg", `已更新花朵资料`, "success");
+    } catch(e) { showMsg("edit-flower-msg", "更新失败：" + e.message, "error"); }
+    setLoading("btn-save-flower", false);
+  };
+
+  window.deleteFlower = async function() {
+    const name = document.getElementById("edit-flower-select").value;
+    const pwd = document.getElementById("delete-flower-pwd").value;
+    if (!name) { showMsg("edit-flower-msg", "请先选择花朵", "error"); return; }
+    if (pwd !== DELETE_PASSWORD) { showMsg("edit-flower-msg", "密码错误", "error"); return; }
+    if (!confirm(`确定要删除花朵「${name}」及相关所有成员数据吗？`)) return;
+    setLoading("btn-delete-flower", true);
+    try {
+      await dbDeleteFlower(name);
+      await loadAll();
+      document.getElementById("delete-flower-pwd").value = "";
+      document.getElementById("edit-flower-select").value = "";
+      document.getElementById("edit-flower-new-name").value = "";
+      showMsg("edit-flower-msg", `已删除花朵「${name}」`, "success");
+    } catch(e) { showMsg("edit-flower-msg", "删除失败：" + e.message, "error"); }
+    setLoading("btn-delete-flower", false);
+  };
+
+  // ===== 工具函數 =====
+  function showMsg(id, msg, type) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = msg;
+    el.className = "msg-box " + type;
+    el.style.display = "block";
+    setTimeout(() => { el.style.display = "none"; }, 4000);
+  }
+
+  function setLoading(btnId, loading) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    btn.disabled = loading;
+    btn.style.opacity = loading ? "0.6" : "1";
+  }
+
+  // ===== 啟動 =====
+  window.addEventListener("DOMContentLoaded", async () => {
+    document.getElementById("search-input").addEventListener("keydown", e => {
+      if (e.key === "Enter") window.searchFlower();
+    });
+    try {
+      await loadAll();
+      startRealtime();
+    } catch(e) {
+      document.getElementById("loading-error").style.display = "block";
+      document.getElementById("loading-error").textContent = "连接失败，请检查 Supabase 设定：" + e.message;
+    }
+    document.getElementById("loading-screen").style.display = "none";
+    document.getElementById("main-app").style.display = "block";
+  });
+</script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;600;700&family=Noto+Sans+SC:wght@400;500;600&display=swap');
+
+  :root {
+    --bg: #fdf8f2;
+    --surface: #fff9f4;
+    --border: #e8d5b7;
+    --text: #3a2a1a;
+    --text-light: #7a5c3a;
+    --accent: #8b4513;
+    --accent2: #c8860a;
+    --shadow: 0 2px 12px rgba(139,69,19,0.10);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Noto Sans SC', sans-serif;
+    font-size: 20px;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    background-image:
+      radial-gradient(circle at 20% 20%, rgba(200,134,10,0.07) 0%, transparent 50%),
+      radial-gradient(circle at 80% 80%, rgba(139,69,19,0.06) 0%, transparent 50%);
+  }
+
+  /* ===== 載入畫面 ===== */
+  #loading-screen {
+    position: fixed; inset: 0;
+    background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 16px;
+    z-index: 9999;
+    font-family: 'Noto Serif SC', serif;
+    font-size: 22px;
+    color: var(--accent);
+  }
+  .loading-spinner {
+    width: 48px; height: 48px;
+    border: 4px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loading-error {
+    display: none;
+    color: #c0392b;
+    font-size: 16px;
+    max-width: 340px;
+    text-align: center;
+    padding: 10px;
+    background: #fdecea;
+    border-radius: 8px;
+  }
+  #main-app { display: none; }
+
+  /* ===== Header ===== */
+  header {
+    background: linear-gradient(135deg, #3a1a0a 0%, #6b3010 50%, #8b4513 100%);
+    padding: 28px 24px 20px;
+    text-align: center;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+  }
+  header h1 {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 36px;
+    color: #f5d88a;
+    letter-spacing: 6px;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  }
+  header p { color: #d4a96a; font-size: 16px; margin-top: 6px; letter-spacing: 2px; }
+
+  .main-container { max-width: 1200px; margin: 0 auto; padding: 24px 16px; }
+
+  /* ===== 卡片 ===== */
+  .section-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 24px;
+    margin-bottom: 28px;
+    box-shadow: var(--shadow);
+  }
+  .section-title {
+    font-family: 'Noto Serif SC', serif;
+    font-size: 24px;
+    color: var(--accent);
+    border-bottom: 2px solid var(--border);
+    padding-bottom: 12px;
+    margin-bottom: 20px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .sub-section-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--accent2);
+    margin-bottom: 14px;
+    padding-left: 10px;
+    border-left: 4px solid var(--accent2);
+  }
+  .divider { border: none; border-top: 1px dashed var(--border); margin: 20px 0; }
+
+  /* ===== 搜尋 ===== */
+  .search-bar { display: flex; gap: 10px; flex-wrap: wrap; }
+  .search-bar input {
+    flex: 1; min-width: 200px;
+    padding: 12px 18px; font-size: 20px;
+    border: 2px solid var(--border); border-radius: 10px;
+    background: white; color: var(--text);
+    font-family: 'Noto Sans SC', sans-serif;
+  }
+  .search-bar input:focus { outline: none; border-color: var(--accent); }
+
+  /* ===== 按鈕 ===== */
+  button {
+    cursor: pointer; font-family: 'Noto Sans SC', sans-serif;
+    font-size: 20px; border: none; border-radius: 10px;
+    padding: 12px 24px; font-weight: 500; transition: all 0.2s;
+  }
+  .btn-primary { background: linear-gradient(135deg,#8b4513,#a0522d); color: white; box-shadow: 0 3px 10px rgba(139,69,19,0.3); }
+  .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 5px 15px rgba(139,69,19,0.4); }
+  .btn-danger { background: linear-gradient(135deg,#c0392b,#e74c3c); color: white; box-shadow: 0 3px 10px rgba(192,57,43,0.3); }
+  .btn-danger:hover { transform: translateY(-1px); }
+  .btn-success { background: linear-gradient(135deg,#27ae60,#2ecc71); color: white; box-shadow: 0 3px 10px rgba(39,174,96,0.3); }
+  .btn-success:hover { transform: translateY(-1px); }
+  .btn-warning { background: linear-gradient(135deg,#d68910,#f39c12); color: white; box-shadow: 0 3px 10px rgba(214,137,16,0.3); }
+  .btn-warning:hover { transform: translateY(-1px); }
+
+  /* ===== 表單 ===== */
+  .form-group { display: flex; flex-direction: column; gap: 8px; margin-bottom: 4px; }
+  .form-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; margin-bottom: 12px; }
+  label { font-size: 18px; color: var(--text-light); font-weight: 500; }
+  input[type="text"], input[type="password"], select {
+    padding: 11px 16px; font-size: 20px;
+    border: 2px solid var(--border); border-radius: 10px;
+    background: white; color: var(--text);
+    font-family: 'Noto Sans SC', sans-serif; min-width: 180px;
+    transition: border-color 0.2s;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  select { min-width: 210px; }
+
+  /* ===== 訊息 ===== */
+  .msg-box { display: none; padding: 10px 18px; border-radius: 8px; font-size: 18px; margin-top: 10px; font-weight: 500; }
+  .msg-box.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+  .msg-box.error   { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+  /* ===== 等級按鈕 ===== */
+  .grade-toggle-btn {
+    width: 100%; text-align: left;
+    padding: 14px 20px; border-radius: 12px;
+    color: white; font-size: 20px;
+    font-family: 'Noto Serif SC', serif; font-weight: 600;
+    border: 2px solid; display: flex; align-items: center; gap: 12px;
+    margin-bottom: 8px; letter-spacing: 1px;
+  }
+  .grade-btn-label { font-size: 20px; flex: 1; letter-spacing: 1px; }
+  .toggle-arrow { font-size: 16px; }
+  .grade-section { margin-bottom: 20px; }
+
+  /* ===== 表格 ===== */
+  .table-scroll { overflow-x: auto; border-radius: 10px; }
+  .data-table { border-collapse: collapse; width: 100%; font-size: 18px; border: 2px solid; border-radius: 10px; overflow: hidden; }
+  .data-table th {
+    padding: 10px 14px; color: white; text-align: center;
+    font-weight: 600; font-family: 'Noto Serif SC', serif;
+    white-space: nowrap; border: 1px solid rgba(255,255,255,0.2);
+  }
+  .data-table td { padding: 9px 14px; text-align: center; border: 1px solid #eee; }
+  .data-table tbody tr:nth-child(even) { background: rgba(0,0,0,0.02); }
+  .data-table tbody tr:hover { background: rgba(139,69,19,0.05); }
+  .flower-name-cell { text-align: left !important; font-weight: 500; white-space: nowrap; }
+  .member-name-cell { text-align: left !important; font-weight: 600; white-space: nowrap; }
+  .count-cell { font-weight: 700; color: var(--accent); }
+  .total-count { color: #27ae60 !important; font-size: 20px; }
+  .has-flower { font-weight: 700; font-size: 18px; }
+  .total-row { background: #fef9ec !important; font-weight: 700; }
+  .summary-table th { min-width: 100px; }
+
+  /* ===== 高亮 ===== */
+  @keyframes highlightPulse {
+    0%, 100% { background-color: transparent; }
+    50% { background-color: #fff176; }
+  }
+  .highlight-row { animation: highlightPulse 1s ease-in-out infinite; outline: 3px solid #f39c12; outline-offset: -1px; }
+
+  /* ===== 成員標籤 ===== */
+  .member-tag {
+    display: inline-block;
+    background: linear-gradient(135deg,#f5e6d3,#eedcca);
+    border: 1px solid var(--border); border-radius: 20px;
+    padding: 6px 16px; margin: 4px; font-size: 18px;
+    color: var(--accent); font-weight: 500;
+  }
+  #member-list-display { margin-top: 12px; }
+  .empty-tip { color: #aaa; text-align: center; padding: 20px; font-size: 18px; }
+
+  @media (max-width: 600px) {
+    header h1 { font-size: 26px; letter-spacing: 2px; }
+    .section-card { padding: 14px; }
+    button, input[type="text"], input[type="password"], select { font-size: 18px; }
+    .data-table { font-size: 16px; }
+    .data-table th, .data-table td { padding: 7px 8px; }
+    .grade-toggle-btn { font-size: 17px; padding: 12px 14px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="loading-screen">
+  <div class="loading-spinner"></div>
+  <div>芳庭揽翠 连接中…</div>
+  <div id="loading-error"></div>
+</div>
+
+<div id="main-app">
+
+<header>
+  <h1>🌸 芳庭揽翠</h1>
+  <p>花朵收藏统计系统</p>
+</header>
+
+<div class="main-container">
+
+  <!-- 第一部分：搜尋 + 統計 -->
+  <div class="section-card">
+    <div class="section-title">🔍 搜寻花朵</div>
+    <div class="search-bar">
+      <input type="text" id="search-input" placeholder="输入花朵名称搜寻…" list="flower-search-list" autocomplete="off">
+      <datalist id="flower-search-list"></datalist>
+      <button class="btn-primary" onclick="searchFlower()">搜寻</button>
+    </div>
+    <div id="search-msg" class="msg-box"></div>
+  </div>
+
+  <div class="section-card">
+    <div class="section-title">📊 花朵数量统计</div>
+    <div id="grade-tables"></div>
+    <div class="grade-section" id="summary-section">
+      <button class="grade-toggle-btn" id="summary-toggle-btn" style="background:#4a6741;border-color:#3a5232;" onclick="toggleSummary()">
+        <span class="grade-btn-label" id="summary-btn-label">总数量．0</span>
+        <span class="toggle-arrow" id="summary-arrow">▼</span>
+      </button>
+      <div class="grade-table-wrap" id="summary-table-wrap" style="display:none">
+        <div id="summary-table-container"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 第二部分：輸入資料 -->
+  <div class="section-card">
+    <div class="section-title">✏️ 数据输入</div>
+
+    <div class="sub-section-title">新增成员拥有花朵</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>选择成员</label>
+        <select id="add-owner-member"><option value="">-- 选择成员 --</option></select>
+      </div>
+      <div class="form-group">
+        <label>选择花朵</label>
+        <select id="add-owner-flower"><option value="">-- 选择花朵 --</option></select>
+      </div>
+      <button class="btn-success" id="btn-add-owner" onclick="addOwnership()" style="align-self:flex-end">新增拥有</button>
+    </div>
+    <div id="add-owner-msg" class="msg-box"></div>
+
+    <hr class="divider">
+
+    <div class="sub-section-title">新增成员</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>成员名字</label>
+        <input type="text" id="new-member-name" placeholder="输入成员名字">
+      </div>
+      <button class="btn-primary" id="btn-add-member" onclick="addMember()" style="align-self:flex-end">新增成员</button>
+    </div>
+    <div id="add-member-msg" class="msg-box"></div>
+
+    <hr class="divider">
+
+    <div class="sub-section-title">新增花朵</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>花朵名称</label>
+        <input type="text" id="new-flower-name" placeholder="输入花朵名称">
+      </div>
+      <div class="form-group">
+        <label>花朵等级</label>
+        <select id="new-flower-grade">
+          <option value="">-- 选择等级 --</option>
+          <option value="仙品（红）">仙品（红）</option>
+          <option value="华品（金）">华品（金）</option>
+          <option value="珍品（紫）氪">珍品（紫）氪</option>
+          <option value="珍品（紫）">珍品（紫）</option>
+        </select>
+      </div>
+      <button class="btn-primary" id="btn-add-flower" onclick="addFlower()" style="align-self:flex-end">新增花朵</button>
+    </div>
+    <div id="add-flower-msg" class="msg-box"></div>
+  </div>
+
+  <!-- 第三部分：資料管理 -->
+  <div class="section-card">
+    <div class="section-title">⚙️ 数据管理</div>
+
+    <div class="sub-section-title">目前成员清单</div>
+    <div id="member-list-display"></div>
+
+    <hr class="divider">
+
+    <div class="sub-section-title">删除成员（需密码）</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>选择成员</label>
+        <select id="delete-member-select"><option value="">-- 选择成员 --</option></select>
+      </div>
+      <div class="form-group">
+        <label>管理密码</label>
+        <input type="password" id="delete-member-pwd" placeholder="输入密码" style="min-width:150px">
+      </div>
+      <button class="btn-danger" id="btn-delete-member" onclick="deleteMember()" style="align-self:flex-end">删除成员</button>
+    </div>
+    <div id="delete-member-msg" class="msg-box"></div>
+
+    <hr class="divider">
+
+    <div class="sub-section-title">修改花朵数据</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>筛选等级</label>
+        <select id="edit-flower-grade-filter" onchange="onEditGradeChange()">
+          <option value="">-- 全部等级 --</option>
+          <option value="仙品（红）">仙品（红）</option>
+          <option value="华品（金）">华品（金）</option>
+          <option value="珍品（紫）氪">珍品（紫）氪</option>
+          <option value="珍品（紫）">珍品（紫）</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>选择花朵</label>
+        <select id="edit-flower-select" onchange="onEditFlowerSelect()"><option value="">-- 选择花朵 --</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>修改名称</label>
+        <input type="text" id="edit-flower-new-name" placeholder="花朵新名称">
+      </div>
+      <div class="form-group">
+        <label>修改等级</label>
+        <select id="edit-flower-new-grade">
+          <option value="">-- 选择等级 --</option>
+          <option value="仙品（红）">仙品（红）</option>
+          <option value="华品（金）">华品（金）</option>
+          <option value="珍品（紫）氪">珍品（紫）氪</option>
+          <option value="珍品（紫）">珍品（紫）</option>
+        </select>
+      </div>
+      <button class="btn-warning" id="btn-save-flower" onclick="saveFlowerEdit()" style="align-self:flex-end">保存修改</button>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>删除此花朵（需密码）</label>
+        <input type="password" id="delete-flower-pwd" placeholder="输入密码" style="min-width:150px">
+      </div>
+      <button class="btn-danger" id="btn-delete-flower" onclick="deleteFlower()" style="align-self:flex-end">删除此花朵</button>
+    </div>
+    <div id="edit-flower-msg" class="msg-box"></div>
+  </div>
+
+  <footer style="text-align:center;color:#b8956a;font-size:16px;padding:20px 0 32px;font-family:'Noto Serif SC',serif;letter-spacing:2px;">
+    芳庭揽翠 · 花朵收藏统计系统
+  </footer>
+
+</div>
+</div>
+</body>
+</html>
