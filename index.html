@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>芳庭揽翠</title>
+<title>无尽种好花</title>
 
 <script>
   // ===== 🔧 在此填入你的 Supabase 設定 =====
@@ -680,6 +680,7 @@
     border: 2px solid var(--border); border-radius: 10px;
     background: white; color: var(--text);
     font-family: 'Noto Sans SC', sans-serif; min-width: 180px;
+    max-width: 100%; box-sizing: border-box;
     transition: border-color 0.2s;
   }
   input:focus, select:focus { outline: none; border-color: var(--accent); }
@@ -747,6 +748,11 @@
     .data-table { font-size: 16px; }
     .data-table th, .data-table td { padding: 7px 8px; }
     .grade-toggle-btn { font-size: 17px; padding: 12px 14px; }
+    .form-row { flex-direction: column; align-items: stretch; }
+    .form-group { width: 100%; }
+    input[type="text"], input[type="password"], select { width: 100%; min-width: unset; }
+    .form-row > button { width: 100%; }
+    .search-bar input { min-width: unset; width: 100%; }
   }
 </style>
 </head>
@@ -754,14 +760,14 @@
 
 <div id="loading-screen">
   <div class="loading-spinner"></div>
-  <div>芳庭揽翠 连接中…</div>
+  <div>无尽种好花 连接中…</div>
   <div id="loading-error"></div>
 </div>
 
 <div id="main-app">
 
 <header>
-  <h1>🌸 芳庭揽翠</h1>
+  <h1>🌸 无尽种好花</h1>
   <p>花朵收藏统计系统</p>
 </header>
 
@@ -915,7 +921,7 @@
   </div>
 
   <footer style="text-align:center;color:#b8956a;font-size:16px;padding:20px 0 32px;font-family:'Noto Serif SC',serif;letter-spacing:2px;">
-    芳庭揽翠 · 花朵收藏统计系统
+    无尽种好花 · 花朵收藏统计系统
   </footer>
 
 </div>
