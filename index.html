@@ -338,11 +338,8 @@
     omSel.innerHTML = `<option value="">-- 选择成员 --</option>` +
       memberList.map(m => `<option value="${m}"${m===omVal?" selected":""}>${m}</option>`).join("");
 
-    // 新增擁有 - 花朵
-    const ofSel = document.getElementById("add-owner-flower");
-    const ofVal = ofSel.value;
-    ofSel.innerHTML = `<option value="">-- 选择花朵 --</option>` +
-      flowerList.map(f => `<option value="${f.name}"${f.name===ofVal?" selected":""}>${f.name}（${f.grade}）</option>`).join("");
+    // 新增擁有 - 花朵 datalist（依等級過濾）
+    updateAddOwnerFlowerList();
 
     // 刪除成員
     const dmSel = document.getElementById("delete-member-select");
@@ -350,20 +347,80 @@
     dmSel.innerHTML = `<option value="">-- 选择成员 --</option>` +
       memberList.map(m => `<option value="${m}"${m===dmVal?" selected":""}>${m}</option>`).join("");
 
+    // 刪除花朵紀錄 - 成員下拉
+    const drSel = document.getElementById("del-record-member");
+    const drVal = drSel.value;
+    drSel.innerHTML = `<option value="">-- 选择成员 --</option>` +
+      memberList.map(m => `<option value="${m}"${m===drVal?" selected":""}>${m}</option>`).join("");
+    // 若已選成員，同步更新其花朵清單
+    if (drVal) updateDelRecordFlowerList(drVal);
+
     // 修改花朵
     updateEditFlowerList();
   }
 
-  function updateEditFlowerList() {
-    const grade = document.getElementById("edit-flower-grade-filter")?.value || "";
-    const sel = document.getElementById("edit-flower-select");
-    if (!sel) return;
-    const curVal = sel.value;
+  function updateAddOwnerFlowerList() {
+    const grade = document.getElementById("add-owner-grade-filter")?.value || "";
+    const dl = document.getElementById("add-owner-flower-list");
+    if (!dl) return;
     const list = grade
       ? Object.values(flowers).filter(f => f.grade === grade)
       : Object.values(flowers).sort((a,b) => a.name.localeCompare(b.name,"zh"));
-    sel.innerHTML = `<option value="">-- 选择花朵 --</option>` +
-      list.map(f => `<option value="${f.name}"${f.name===curVal?" selected":""}>${f.name}</option>`).join("");
+    dl.innerHTML = list.map(f => `<option value="${f.name}">`).join("");
+  }
+
+  // ===== 刪除花朵紀錄 =====
+  function updateDelRecordFlowerList(memberName) {
+    const dl = document.getElementById("del-record-flower-list");
+    if (!dl) return;
+    if (!memberName) { dl.innerHTML = ""; return; }
+    const owned = ownership[memberName] || {};
+    const list = Object.keys(owned).sort((a,b) => a.localeCompare(b,"zh"));
+    dl.innerHTML = list.map(name => `<option value="${name}">`).join("");
+  }
+
+  window.onDelRecordMemberChange = function() {
+    document.getElementById("del-record-flower").value = "";
+    const member = document.getElementById("del-record-member").value;
+    updateDelRecordFlowerList(member);
+  };
+
+  window.deleteOwnershipRecord = async function() {
+    const member = document.getElementById("del-record-member").value;
+    const flower = document.getElementById("del-record-flower").value.trim();
+    if (!member) { showMsg("del-record-msg", "请选择成员", "error"); return; }
+    if (!flower) { showMsg("del-record-msg", "请选择花朵", "error"); return; }
+    if (!flowers[flower]) { showMsg("del-record-msg", `花朵「${flower}」不存在`, "error"); return; }
+    if (!ownership[member]?.[flower]) { showMsg("del-record-msg", `${member} 没有拥有「${flower}」`, "error"); return; }
+    if (!confirm(`确定要删除 ${member} 的「${flower}」拥有纪录吗？`)) return;
+
+    setLoading("btn-del-record", true);
+    try {
+      await sbDelete("ownership",
+        "member_name=eq." + encodeURIComponent(member) +
+        "&flower_name=eq." + encodeURIComponent(flower));
+      await loadAll();
+      document.getElementById("del-record-flower").value = "";
+      showMsg("del-record-msg", `已删除 ${member} 的「${flower}」纪录`, "success");
+    } catch(e) {
+      showMsg("del-record-msg", "删除失败：" + e.message, "error");
+    }
+    setLoading("btn-del-record", false);
+  };
+
+  window.onAddOwnerGradeChange = function() {
+    document.getElementById("add-owner-flower").value = "";
+    updateAddOwnerFlowerList();
+  };
+
+  function updateEditFlowerList() {
+    const grade = document.getElementById("edit-flower-grade-filter")?.value || "";
+    const dl = document.getElementById("edit-flower-select-list");
+    if (!dl) return;
+    const list = grade
+      ? Object.values(flowers).filter(f => f.grade === grade)
+      : Object.values(flowers).sort((a,b) => a.name.localeCompare(b.name,"zh"));
+    dl.innerHTML = list.map(f => `<option value="${f.name}">`).join("");
   }
 
   // ===== 搜尋 =====
@@ -463,17 +520,22 @@
   };
 
   // ===== 修改花朵 =====
-  window.onEditGradeChange = function() { updateEditFlowerList(); };
+  window.onEditGradeChange = function() {
+    document.getElementById("edit-flower-select").value = "";
+    document.getElementById("edit-flower-new-name").value = "";
+    document.getElementById("edit-flower-new-grade").value = "";
+    updateEditFlowerList();
+  };
 
   window.onEditFlowerSelect = function() {
-    const name = document.getElementById("edit-flower-select").value;
+    const name = document.getElementById("edit-flower-select").value.trim();
     if (!name || !flowers[name]) return;
     document.getElementById("edit-flower-new-name").value = flowers[name].name;
     document.getElementById("edit-flower-new-grade").value = flowers[name].grade;
   };
 
   window.saveFlowerEdit = async function() {
-    const oldName = document.getElementById("edit-flower-select").value;
+    const oldName = document.getElementById("edit-flower-select").value.trim();
     const newName = document.getElementById("edit-flower-new-name").value.trim();
     const newGrade = document.getElementById("edit-flower-new-grade").value;
     if (!oldName) { showMsg("edit-flower-msg", "请先选择花朵", "error"); return; }
@@ -809,8 +871,19 @@
         <select id="add-owner-member"><option value="">-- 选择成员 --</option></select>
       </div>
       <div class="form-group">
+        <label>筛选等级</label>
+        <select id="add-owner-grade-filter" onchange="onAddOwnerGradeChange()">
+          <option value="">-- 全部等级 --</option>
+          <option value="仙品（红）">仙品（红）</option>
+          <option value="华品（金）">华品（金）</option>
+          <option value="珍品（紫）氪">珍品（紫）氪</option>
+          <option value="珍品（紫）">珍品（紫）</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>选择花朵</label>
-        <select id="add-owner-flower"><option value="">-- 选择花朵 --</option></select>
+        <input type="text" id="add-owner-flower" placeholder="输入或选择花朵名称…" list="add-owner-flower-list" autocomplete="off">
+        <datalist id="add-owner-flower-list"></datalist>
       </div>
       <button class="btn-success" id="btn-add-owner" onclick="addOwnership()" style="align-self:flex-end">新增拥有</button>
     </div>
@@ -890,7 +963,8 @@
       </div>
       <div class="form-group">
         <label>选择花朵</label>
-        <select id="edit-flower-select" onchange="onEditFlowerSelect()"><option value="">-- 选择花朵 --</option></select>
+        <input type="text" id="edit-flower-select" placeholder="输入或选择花朵名称…" list="edit-flower-select-list" autocomplete="off" oninput="onEditFlowerSelect()">
+        <datalist id="edit-flower-select-list"></datalist>
       </div>
     </div>
     <div class="form-row">
@@ -918,6 +992,25 @@
       <button class="btn-danger" id="btn-delete-flower" onclick="deleteFlower()" style="align-self:flex-end">删除此花朵</button>
     </div>
     <div id="edit-flower-msg" class="msg-box"></div>
+
+    <hr class="divider">
+
+    <div class="sub-section-title">删除花朵纪录</div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>选择成员</label>
+        <select id="del-record-member" onchange="onDelRecordMemberChange()">
+          <option value="">-- 选择成员 --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>选择花朵</label>
+        <input type="text" id="del-record-flower" placeholder="输入或选择花朵名称…" list="del-record-flower-list" autocomplete="off">
+        <datalist id="del-record-flower-list"></datalist>
+      </div>
+      <button class="btn-danger" id="btn-del-record" onclick="deleteOwnershipRecord()" style="align-self:flex-end">删除纪录</button>
+    </div>
+    <div id="del-record-msg" class="msg-box"></div>
   </div>
 
   <footer style="text-align:center;color:#b8956a;font-size:16px;padding:20px 0 32px;font-family:'Noto Serif SC',serif;letter-spacing:2px;">
